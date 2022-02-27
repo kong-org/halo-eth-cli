@@ -33,15 +33,14 @@ if (args[0] === "sign") {
         let pkey2 = null;
         let pkey3 = null;
 
-        pkey1 = res.slice(1, res[0]).toString('hex');
+        pkey1 = res.slice(1, res[0] + 1).toString('hex');
         res = res.slice(1 + res[0]);
 
-        pkey2 = res.slice(1, res[0]).toString('hex');
+        pkey2 = res.slice(1, res[0] + 1).toString('hex');
         res = res.slice(1 + res[0]);
 
         if (res.length > 0) {
-            pkey3 = res.slice(1, res[0]).toString('hex');
-            res = res.slice(1 + res[0]);
+            pkey3 = res.slice(1, res[0] + 1).toString('hex');
         }
 
         return {pkey1, pkey2, pkey3};
