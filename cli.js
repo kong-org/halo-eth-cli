@@ -3,6 +3,7 @@ const { NFC } = require('nfc-pcsc');
 const EC = require('elliptic').ec;
 const ethers = require('ethers');
 const sha256 = require('js-sha256').sha256;
+const queryString = require('query-string');
 
 const ec = new EC('secp256k1');
 
@@ -200,8 +201,17 @@ if (args[0] === "sign" || args[0] === "sign_raw") {
     cb = async (execCmd) => {
         return await readPublicKeys(execCmd);
     };
+} else if (args[0] === "ndef") {
+    cb = async (execCmd, readNdef) => {
+        let obj = await readNdef();
+        let out = {};
+        Object.keys(obj).forEach((k) => {
+            out[k] = obj[k];
+        });
+        return {"success": true, "dynamic": out};
+    }
 } else if (args[0] === "info") {
-    cb = async (execCmd) => {
+    cb = async (execCmd, readNdef) => {
         let {pkey1, pkey2, pkey3} = await readPublicKeys(execCmd);
 
         let payload = Buffer.from("0401", "hex");
@@ -210,7 +220,17 @@ if (args[0] === "sign" || args[0] === "sign_raw") {
         payload = Buffer.from("0402", "hex");
         let res2 = await execCmd(payload);
 
-        if (res1[0] !== 0xC2 || res2[0] !== 0xC2) {
+        let tagVersion = null;
+
+        if (res1[0] !== res2[0]) {
+            throw Error('Mismatched tag version!');
+        }
+
+        if (res1[0] === 0xC2) {
+            tagVersion = 0xC2;
+        } else if (res1[0] === 0xC3) {
+            tagVersion = 0xC3;
+        } else {
             throw Error('Unknown tag version!');
         }
 
@@ -245,8 +265,26 @@ if (args[0] === "sign" || args[0] === "sign_raw") {
         let challengePkey2 = randomBytes(32);
         let challengePkey3 = randomBytes(32);
 
+        let counter = null;
+
         let checkPkey1 = await signChallenge(execCmd, 1, challengePkey1);
-        let checkPkey2 = await signChallenge(execCmd, 2, challengePkey2);
+        let checkPkey2 = null;
+
+        if (tagVersion === 0xC2) {
+            checkPkey2 = await signChallenge(execCmd, 2, challengePkey2);
+        } else if (tagVersion === 0xC3) {
+            let ndef = await readNdef();
+
+            let cmdBuf = Buffer.from(ndef.cmd, 'hex');
+            let resBuf = Buffer.from(ndef.res, 'hex');
+            cmdBuf = cmdBuf.slice(2, 32 + 2);
+            resBuf = resBuf.slice(0, resBuf[1] + 2);
+            counter = cmdBuf.readUInt32BE(0);
+
+            challengePkey2 = cmdBuf;
+            checkPkey2 = resBuf;
+        }
+
         let checkPkey3 = null;
 
         if (pkey3) {
@@ -284,7 +322,8 @@ if (args[0] === "sign" || args[0] === "sign_raw") {
             issuer: attestKeyObj1,
             tagBuiltinKeys: {
                 publicKey1: pkey1,
-                publicKey2: pkey2
+                publicKey2: pkey2,
+                counterPk2: counter,
             },
             tagAdditionalKeys: {
                 publicKey3: pkey3
@@ -389,6 +428,54 @@ function stopPCSC(code) {
     nfc.close();
 }
 
+async function readNDEF(reader) {
+    let resSelect = await reader.transmit(Buffer.from("00A4040007D276000085010100", "hex"), 255);
+
+    if (resSelect.compare(Buffer.from([0x90, 0x00])) !== 0) {
+        throw Error("Unable to select app");
+    }
+
+    let resSelectFile = await reader.transmit(Buffer.from("00A4000C02E10400", "hex"), 255);
+
+    if (resSelectFile.compare(Buffer.from([0x90, 0x00])) !== 0) {
+        throw Error("Unable to select NDEF file");
+    }
+
+    let readCmdBuf = Buffer.from("00B0000002", "hex");
+    let resReadLength = await reader.transmit(readCmdBuf, 255);
+
+    if (resReadLength.slice(-2).compare(Buffer.from([0x90, 0x00])) !== 0) {
+        throw Error("Unable to read NDEF length");
+    }
+
+    let ndefLen = resReadLength.readUInt16BE(0) + 2;
+    let offset = 0;
+
+    let fullBuf = Buffer.alloc(0);
+
+    while (ndefLen > 0) {
+        readCmdBuf.writeUInt16BE(offset, 2);
+        // ACR122U-A9 readers have a bug where they are returning 6F00 when Le is set to more than 0x3B
+        // sounds like a firmware bug, because it can't be reproduced with other kinds of readers
+        // (the same APDU is just working fine lol)
+        readCmdBuf[4] = 0x30;
+
+        let resReadNDEF = await reader.transmit(readCmdBuf, 255);
+
+        if (resReadNDEF.slice(-2).compare(Buffer.from([0x90, 0x00])) !== 0) {
+            throw Error("Unable to read NDEF file");
+        }
+
+        fullBuf = Buffer.concat([fullBuf, resReadNDEF.slice(0, -2)]);
+        ndefLen -= 0x30;
+        offset += 0x30;
+    }
+
+    fullBuf = fullBuf.slice(0, ndefLen);
+    let qs = 'v=' + fullBuf.toString().split('?v=', 2)[1];
+    return queryString.parse(qs);
+}
+
 async function executeCommand(reader, payload) {
     let resSelect = await reader.transmit(Buffer.from("00A4040007481199130e9f0100", "hex"), 255);
 
@@ -425,7 +512,7 @@ nfc.on('reader', reader => {
         let res = null;
 
         try {
-            res = await cb((payload) => executeCommand(reader, payload));
+            res = await cb((payload) => executeCommand(reader, payload), () => readNDEF(reader));
         } catch (e) {
             console.error(e);
         }
