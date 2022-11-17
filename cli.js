@@ -231,7 +231,7 @@ if (args[0] === "sign" || args[0] === "sign_raw") {
         } else if (res1[0] === 0xC3) {
             tagVersion = 0xC3;
         } else {
-            throw Error('Unknown tag version!');
+            throw Error(`Unknown tag version: 0x${res1[0].toString(16)}`);
         }
 
         let attestSig1 = res1.slice(2);
@@ -417,7 +417,7 @@ function stopPCSC(code) {
     clearTimeout(timeout);
 
     if (code !== "done") {
-        console.error('NFC card or compatible PC/SC reader not found.');
+        console.error(`NFC card or compatible PC/SC reader not found. Error code:  ${code}`);
     }
 
     for (let rdrName in nfc.readers) {
